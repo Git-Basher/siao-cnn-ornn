@@ -208,4 +208,5 @@ __marimo__/
 
 # uv
 uv.lock
+results/plots
 

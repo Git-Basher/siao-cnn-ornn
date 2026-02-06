@@ -13,7 +13,7 @@ Author: SIAO-CNN-ORNN Integration
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 from typing import Tuple, Optional, Dict
 import logging
 
@@ -110,278 +110,190 @@ def run_complete_pipeline(
     console.print(f" [bold]Windowed data:[/bold] X={X_windows.shape}, y={y_windows.shape}")
     
     # =========================================================================
-    # Step 3: Train/Validation Split
+    # Step 3: 5-Fold Cross-Validation Setup
     # =========================================================================
-    console.print(Panel("[bold green]Step 3: Train/Validation Split[/bold green]", box=box.DOUBLE))
+    console.print(Panel("[bold green]Step 3: 5-Fold Cross-Validation Setup[/bold green]", box=box.DOUBLE))
     
-    # Stratified split
-    train_idx, val_idx = train_test_split(
-        np.arange(len(y_windows)),
-        test_size=test_size,
-        stratify=y_windows,
-        random_state=42
-    )
-    
-    X_train = X_windows[train_idx]
-    y_train = y_windows[train_idx]
-    X_val = X_windows[val_idx]
-    y_val = y_windows[val_idx]
-    
-    console.print(f" [bold]Train:[/bold] X={X_train.shape}, y={y_train.shape}")
-    console.print(f" [bold]Val:[/bold]   X={X_val.shape}, y={y_val.shape}")
-    
-    # =========================================================================
-    # Step 4: CNN Feature Extraction
-    # =========================================================================
-    console.print(Panel("[bold green]Step 4: CNN Feature Extraction[/bold green]", box=box.DOUBLE))
-    
-    from stage3_models.cnn_model import CNNFeatureExtractorForSequence, create_cnn_extractor
-    
-    # Input shape: [samples, time_steps, features]
-    input_channels = X_train.shape[2]  # Features (43)
-    
-    # Initialize CNN
-    cnn = create_cnn_extractor(
-        input_shape=(window_size, input_channels),
-        embedding_dim=cnn_embedding_dim,
-        dropout=0.2
-    ).to(device)
-    
-    # Convert to tensors for CNN feature extraction
-    X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
-    X_val_t = torch.tensor(X_val, dtype=torch.float32).to(device)
-    
-    # Extract features in batches meant for sequence processing
-    # Note: CNNFeatureExtractorForSequence isn't strictly needed unless we treat 
-    # the window itself as a sequence of smaller chunks. 
-    # Here, we treat the window as an image (1, H, W) or signal (C, L).
-    # Since our CNN is 2D, we likely need to reshape: [batch, 1, time, features]
-    
-    # For efficiency, we'll process in batches
-    def extract_cnn_features(model, X_tensor, batch_size=64):
-        model.eval()
-        embeddings = []
-        with torch.no_grad():
-            for i in range(0, len(X_tensor), batch_size):
-                batch = X_tensor[i:i+batch_size]
-                # Reshape: [batch, 1, time, features]
-                batch = batch.unsqueeze(1)
-                emb = model(batch)
-                embeddings.append(emb.cpu().numpy())
-        return np.vstack(embeddings)
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.metrics import accuracy_score, classification_report
+    from stage6_visualization import plot_training_results, plot_confusion_matrix_heatmap
 
-    with console.status("[bold green]Extracting CNN features...[/bold green]", spinner="dots"):
-        X_train_cnn = extract_cnn_features(cnn, X_train_t)
-        X_val_cnn = extract_cnn_features(cnn, X_val_t)
     
-    console.print(f"[bold]CNN embeddings:[/bold] Train={X_train_cnn.shape}, Val={X_val_cnn.shape}")
+    # Initialize Stratified K-Fold
+    # Ensure n_splits=5 as per research specs
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     
-    # =========================================================================
-    # Step 4.5: WKS Feature Extraction (Aquila-optimized)
-    # =========================================================================
-    console.print(Panel("[bold green]Step 4.5: WKS Feature Extraction (Aquila-optimized)[/bold green]", box=box.DOUBLE))
-    
-    from stage4_optimizers.aquila_optimizer import WKSOptimizer
-    from stage2_features.feature_extractor import extract_statistical_features
-    
-    # Extract Standard Statistical Features
-    console.print("[bold green]Extracting Standard Statistical Features...[/bold green]")
-    X_train_stat = extract_statistical_features(X_train)
-    X_val_stat = extract_statistical_features(X_val)
-    console.print(f"[bold]Statistical features:[/bold] Train={X_train_stat.shape}, Val={X_val_stat.shape}")
-
-    # We need to find optimal omega using Training data
-    # Create optimizer
-    wks_opt = WKSOptimizer(
-        pop_size=wks_pop_size,
-        max_iter=wks_max_iter
-    )
-    
-    console.print("[bold cyan]Starting Aquila Optimizer...[/bold cyan]")
-    
-    # Run optimization
-    with console.status("[bold cyan]Optimizing WKS parameters...[/bold cyan]", spinner="simpleDotsScrolling"):
-        optimal_omega, fitness, history = wks_opt.optimize(X_train, y_train)
-    
-    console.print(f"[bold]Optimal Omega:[/bold] {optimal_omega:.4f}")
-    console.print(f"[bold]Best Fitness:[/bold] {fitness:.4f}")
-    
-    # Extract features using optimal omega
-    console.print("Extracting WKS features...")
-    X_train_wks = wks_opt.extract_wks_features(X_train, omega=optimal_omega)
-    X_val_wks = wks_opt.extract_wks_features(X_val, omega=optimal_omega)
-    
-    console.print(f"[bold]WKS features:[/bold] Train={X_train_wks.shape}, Val={X_val_wks.shape}")
-    
-    # Combine CNN + Statistical + WKS features
-    # Order: [CNN Features, Statistical Features, WKS Features]
-    X_train_combined = np.hstack([X_train_cnn, X_train_stat, X_train_wks])
-    X_val_combined = np.hstack([X_val_cnn, X_val_stat, X_val_wks])
-    
-    console.print(f"[bold]Combined features:[/bold] Train={X_train_combined.shape}, Val={X_val_combined.shape}")
-    
-    # Convert for RNN [batch, 1, combined_features] 
-    X_train_rnn = torch.tensor(X_train_combined, dtype=torch.float32).unsqueeze(1).to(device)
-    X_val_rnn = torch.tensor(X_val_combined, dtype=torch.float32).unsqueeze(1).to(device)
-    
-    # console.print(f"[dim]RNN Input: {X_train_rnn.shape}[/dim]")
+    fold_accuracies = []
     
     # =========================================================================
-    # Step 5: ORNN Training (SIAO + Backprop)
+    # Step 4: Cross-Validation Loop
     # =========================================================================
-    console.print(Panel("[bold green]Step 5: ORNN Training (SIAO + Backprop)[/bold green]", box=box.DOUBLE))
     
-    from stage3_models.ornn_model import ORNN, SIAOORNNTrainer, plot_ornn_training
-    
-    # Combined input size = CNN embedding + WKS features
-    combined_input_size = X_train_combined.shape[1]
-    
-    ornn = ORNN(
-        input_size=combined_input_size,
-        hidden_size=rnn_hidden_size,
-        num_layers=1,
-        cell_type='gru'
-    )
-    
-    trainer = SIAOORNNTrainer(
-        ornn=ornn,
-        output_size=num_classes,
-        device=device,
-        siao_pop_size=siao_pop_size,
-        siao_max_iter=siao_max_iter,
-        bp_epochs=100,
-        bp_lr=0.001,
-        weight_bounds=(-1.0, 1.0),
-        fc_dropout=0.2,
-        weight_decay=1e-5,
-        patience=20
-    )
-
-    # -------------------------------------------------------------------------
-    # Display Parameter Counts
-    # -------------------------------------------------------------------------
-    def count_parameters(model):
-        return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    cnn_params = count_parameters(cnn) # These might be 'trainable' in the model object, but we are treating them as fixed extractors here
-    ornn_params = count_parameters(ornn)
-    fc_params = count_parameters(trainer.fc)
-    total_trainable = ornn_params + fc_params
-    
-    param_table = Table(title="Model Parameters", box=box.ROUNDED)
-    param_table.add_column("Component", style="cyan")
-    param_table.add_column("Parameters", justify="right")
-    param_table.add_column("Status", style="yellow")
-    
-    param_table.add_row("CNN (Feature Extractor)", f"{cnn_params:,}", "Fixed/Frozen")
-    param_table.add_row("ORNN (Recurrent Layer)", f"{ornn_params:,}", "[green]Trainable[/green]")
-    param_table.add_row("Classifier Head (FC)", f"{fc_params:,}", "[green]Trainable[/green]")
-    param_table.add_section()
-    param_table.add_row("[bold]Total Trainable[/bold]", f"[bold]{total_trainable:,}[/bold]", "")
-    
-    console.print(param_table)
-    
-    # Calculate Class Weights
-    if use_class_weights:
-        class_counts = np.bincount(y_train, minlength=num_classes)
-        total_samples = len(y_train)
-        # Inverse frequency weights: total / (num_classes * count)
-        class_weights = total_samples / (num_classes * (class_counts + 1))
-        class_weights_t = torch.tensor(class_weights, dtype=torch.float32).to(device)
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X_windows, y_windows)):
+        console.print(f"\n[bold magenta]=== Fold {fold+1}/5 ===[/bold magenta]")
         
-        console.print(f"[bold]Class counts:[/bold] {class_counts}")
-        console.print(f"[bold]Class weights:[/bold] {class_weights}")
+        X_train, X_val = X_windows[train_idx], X_windows[val_idx]
+        y_train, y_val = y_windows[train_idx], y_windows[val_idx]
         
-        # Update trainer to use class weights
-        trainer.criterion = nn.CrossEntropyLoss(weight=class_weights_t)
-    else:
-        console.print("[bold yellow]Using standard CrossEntropyLoss (no class weights)[/bold yellow]")
-        trainer.criterion = nn.CrossEntropyLoss()
-    
-    console.print("[bold cyan]Starting Hybrid Training...[/bold cyan]")
-    history = trainer.train(
-        X_train_rnn, y_train,
-        X_val_rnn, y_val,
-        batch_size=batch_size
-    )
-    
-    # =========================================================================
-    # Step 6: Final Evaluation
-    # =========================================================================
-    console.print(Panel("[bold green]Step 6: Final Evaluation[/bold green]", box=box.DOUBLE))
-    
-    ornn.eval()
-    trainer.fc.eval()
-    
-    with torch.no_grad():
-        output, _ = ornn(X_train_rnn)
-        last_hidden = output[:, -1, :]
-        logits = trainer.fc(last_hidden)
-        _, predicted_train = logits.max(1)
+        console.print(f" [bold]Train:[/bold] {len(y_train)} samples, [bold]Val:[/bold] {len(y_val)} samples")
+
+        # Convert to tensors
+        X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
+        X_val_t = torch.tensor(X_val, dtype=torch.float32).to(device)
         
-        output_val, _ = ornn(X_val_rnn)
-        last_hidden_val = output_val[:, -1, :]
-        logits_val = trainer.fc(last_hidden_val)
-        _, predicted_val = logits_val.max(1)
-        val_preds = predicted_val.cpu().numpy()
-    
-    # Calculate basic accuracy
-    train_acc = (predicted_train.cpu().numpy() == y_train).mean()
-    val_acc = (val_preds == y_val).mean()
-    
-    console.print(f"[bold]Final Train Accuracy:[/bold] [green]{train_acc:.4f}[/green]")
-    console.print(f"[bold]Final Val Accuracy:[/bold]   [green]{val_acc:.4f}[/green]")
-    
-    # Detailed report
-    from sklearn.metrics import classification_report
-    report = classification_report(y_val, predicted_val.cpu().numpy(), output_dict=True)
-    
-    # Create Table
-    table = Table(title="Classification Report", box=box.ROUNDED)
-    table.add_column("Class", style="cyan", no_wrap=True)
-    table.add_column("Precision", justify="right")
-    table.add_column("Recall", justify="right")
-    table.add_column("F1-Score", justify="right")
-    table.add_column("Support", justify="right")
-    
-    for cls_id in sorted([k for k in report.keys() if k.isdigit()]):
-        metrics = report[cls_id]
-        table.add_row(
-            str(cls_id),
-            f"{metrics['precision']:.3f}",
-            f"{metrics['recall']:.3f}",
-            f"{metrics['f1-score']:.3f}",
-            str(metrics['support'])
+        # ---------------------------------------------------------------------
+        # CNN Feature Extraction (Fresh for each fold)
+        # ---------------------------------------------------------------------
+        input_channels = X_train.shape[2]
+        
+        from stage3_models.cnn_model import create_cnn_extractor
+        cnn = create_cnn_extractor(
+            input_shape=(window_size, input_channels),
+            embedding_dim=cnn_embedding_dim,
+            dropout=0.2
+        ).to(device)
+        
+        def extract_cnn_features_batch(model, X_tensor, batch_size=64):
+            model.eval()
+            embeddings = []
+            with torch.no_grad():
+                for i in range(0, len(X_tensor), batch_size):
+                    batch = X_tensor[i:i+batch_size].unsqueeze(1)
+                    emb = model(batch)
+                    embeddings.append(emb.cpu().numpy())
+            return np.vstack(embeddings)
+
+        with console.status(f"[bold]Fold {fold+1}: Extracting CNN features...[/bold]", spinner="dots"):
+            X_train_cnn = extract_cnn_features_batch(cnn, X_train_t)
+            X_val_cnn = extract_cnn_features_batch(cnn, X_val_t)
+            
+        # ---------------------------------------------------------------------
+        # Statistical & WKS Features
+        # ---------------------------------------------------------------------
+        from stage4_optimizers.aquila_optimizer import WKSOptimizer
+        from stage2_features.feature_extractor import extract_statistical_features
+        
+        with console.status(f"[bold]Fold {fold+1}: Extracting Statistical features...[/bold]", spinner="dots"):
+            X_train_stat = extract_statistical_features(X_train)
+            X_val_stat = extract_statistical_features(X_val)
+
+        wks_opt = WKSOptimizer(pop_size=wks_pop_size, max_iter=wks_max_iter)
+        
+        with console.status(f"[bold]Fold {fold+1}: Optimizing WKS parameters...[/bold]", spinner="simpleDotsScrolling"):
+            # Suppress logging inside the status context if possible by reducing log level temporarily or just rely on console
+            optimal_omega, _, _ = wks_opt.optimize(X_train, y_train)
+            
+        X_train_wks = wks_opt.extract_wks_features(X_train, omega=optimal_omega)
+        X_val_wks = wks_opt.extract_wks_features(X_val, omega=optimal_omega)
+        
+        # Combine Features
+        X_train_combined = np.hstack([X_train_cnn, X_train_stat, X_train_wks])
+        X_val_combined = np.hstack([X_val_cnn, X_val_stat, X_val_wks])
+        
+        # ---------------------------------------------------------------------
+        # ORNN Training
+        # ---------------------------------------------------------------------
+        from stage3_models.ornn_model import ORNN, SIAOORNNTrainer
+        
+        combined_input_size = X_train_combined.shape[1]
+        
+        ornn = ORNN(
+            input_size=combined_input_size,
+            hidden_size=rnn_hidden_size,
+            num_layers=1,
+            cell_type='gru'
         )
-    
-    # Add averages
-    table.add_section()
-    table.add_row(
-        "Accuracy", "", "", f"{report['accuracy']:.3f}", str(report['macro avg']['support'])
-    )
-    
-    console.print(table)
-    
-    console.print(Panel("[bold green]Training Complete![/bold green]", box=box.DOUBLE))
-    console.print(f"Final Validation Accuracy: [bold green]{val_acc:.4f}[/bold green]")
-    
-    # Plot training history
-    plot_ornn_training(history)
-    
+        
+        trainer = SIAOORNNTrainer(
+            ornn=ornn,
+            output_size=num_classes,
+            device=device,
+            siao_pop_size=siao_pop_size,
+            siao_max_iter=siao_max_iter,
+            bp_epochs=bp_epochs,
+            bp_lr=0.001,
+            weight_bounds=(-1.0, 1.0),
+            fc_dropout=0.2,
+            weight_decay=1e-5,
+            patience=20
+        )
+        
+        # Class Weights
+        if use_class_weights:
+            class_counts = np.bincount(y_train, minlength=num_classes)
+            # Add 1 to avoid division by zero if a class is missing in a fold (unlikely with StratifiedKFold)
+            weights = len(y_train) / (num_classes * (class_counts + 1))
+            weights_t = torch.tensor(weights, dtype=torch.float32).to(device)
+            trainer.criterion = nn.CrossEntropyLoss(weight=weights_t)
+        else:
+            trainer.criterion = nn.CrossEntropyLoss()
+            
+        # Prepare Data for RNN (Numpy format for trainer.train)
+        # Ensure 3D shape: [samples, 1, features]
+        if X_train_combined.ndim == 2:
+            X_train_rnn_np = np.expand_dims(X_train_combined, axis=1)
+            X_val_rnn_np = np.expand_dims(X_val_combined, axis=1)
+        else:
+            X_train_rnn_np = X_train_combined
+            X_val_rnn_np = X_val_combined
+            
+        # Used for evaluation later
+        X_train_rnn = torch.tensor(X_train_rnn_np, dtype=torch.float32).to(device)
+        X_val_rnn = torch.tensor(X_val_rnn_np, dtype=torch.float32).to(device)
+        
+        # Train - Pass numpy arrays as expected by SIAOORNNTrainer
+        # It handles tensor conversion and dataloader creation internally
+        console.print("[bold yellow]DEBUG: Calling trainer.train...[/bold yellow]")
+        console.print(f"X_train_rnn_np type: {type(X_train_rnn_np)} shape: {X_train_rnn_np.shape}")
+        
+        result_dict = trainer.train(
+            X_train_rnn_np, y_train,
+            X_val_rnn_np, y_val,
+            batch_size=batch_size
+        )
+        history = result_dict['backprop']
+        
+        # Plot training results
+        plot_training_results(history, fold_idx=fold, save_dir='results/plots')
+        
+        # Evaluate Fold
+        ornn.eval()
+        trainer.fc.eval()
+        with torch.no_grad():
+            ornn_out, _ = ornn(X_val_rnn)
+            last_hidden = ornn_out[:, -1, :]
+            outputs = trainer.fc(last_hidden)
+            _, preds = torch.max(outputs, 1)
+            
+            # Plot confusion matrix
+            plot_confusion_matrix_heatmap(
+                y_val, preds.cpu().numpy(), 
+                classes=[str(c) for c in range(num_classes)],
+                fold_idx=fold,
+                save_dir='results/plots'
+            )
+            
+            fold_acc = accuracy_score(y_val, preds.cpu().numpy())
+            fold_accuracies.append(fold_acc)
+            
+        console.print(f"[bold green]Fold {fold+1} Accuracy: {fold_acc*100:.2f}%[/bold green]")
+        
     # =========================================================================
-    # Return Results
+    # Final Results Aggregation
     # =========================================================================
-    results = {
-        'train_accuracy': train_acc,
-        'val_accuracy': val_acc,
-        'history': history,
-        'cnn_model': cnn,
-        'ornn_trainer': trainer,
-        'y_val': y_val,
-        'val_preds': val_preds
+    avg_acc = np.mean(fold_accuracies)
+    std_acc = np.std(fold_accuracies)
+    
+    console.print(Panel(f"[bold]5-Fold Cross-Validation Results[/bold]\n"
+                        f"\nFold Scores: {[f'{x*100:.2f}%' for x in fold_accuracies]}\n"
+                        f"\n[bold green]Average Accuracy: {avg_acc*100:.2f}% (+/- {std_acc*100:.2f}%)[/bold green]\n"
+                        f"Target: 98.74%", title="Final Report", box=box.DOUBLE))
+
+    return {
+        'avg_accuracy': avg_acc,
+        'fold_accuracies': fold_accuracies,
+        'std_accuracy': std_acc
     }
-    
-    return results
 
 
 # =============================================================================
@@ -398,19 +310,19 @@ def quick_start():
     """
     return run_complete_pipeline(
         data_dir='data/',
-        window_size=50,
+        window_size=100, # Updated to 100
         stride=25,
         cnn_embedding_dim=256,
         wks_dim=43,
         rnn_hidden_size=128,
         num_classes=6,
-        test_size=0.2,
+        test_size=0.2, # Still used for fallback if needed, but CV overrides logic
         wks_pop_size=15,
         wks_max_iter=30,
         siao_pop_size=15,
         siao_max_iter=30,
-        bp_epochs=50,
-        batch_size=32
+        bp_epochs=100,
+        batch_size=163
     )
 
 
@@ -426,4 +338,4 @@ if __name__ == '__main__':
     
     print("\n" + "=" * 60)
     print("Training Complete!")
-    print(f"Final Validation Accuracy: {results['val_accuracy']:.4f}")
+    print(f"Final Average Accuracy: {results['avg_accuracy']:.4f}")

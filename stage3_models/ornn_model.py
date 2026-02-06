@@ -374,6 +374,8 @@ class ORNN(nn.Module):
             
             # Apply dropout between layers
             if layer < self.num_layers - 1:
+                if not isinstance(layer_input, torch.Tensor):
+                    logger.error(f"Dropout Input Type Error: Expected Tensor, got {type(layer_input)}")
                 layer_input = self.dropout_layer(layer_input)
         
         h_n = torch.stack(h_n_list, dim=0)
@@ -488,7 +490,14 @@ class SIAOORNNTrainer:
                 output, _ = self.ornn(X)
                 # Use last hidden state
                 last_hidden = output[:, -1, :]
-                logits = self.fc(last_hidden)
+                
+                try:
+                    logits = self.fc(last_hidden)
+                except Exception as e:
+                    print(f"CRASH IN OBJECTIVE: {e}")
+                    print(f"last_hidden type: {type(last_hidden)}")
+                    print(f"last_hidden shape: {last_hidden.shape if hasattr(last_hidden, 'shape') else 'no shape'}")
+                    raise e
                 
                 # Compute loss
                 loss = self.criterion(logits, y)
