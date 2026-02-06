@@ -137,6 +137,30 @@ def run_complete_pipeline(
         
         console.print(f" [bold]Train:[/bold] {len(y_train)} samples, [bold]Val:[/bold] {len(y_val)} samples")
 
+        # ---------------------------------------------------------------------
+        # Data Augmentation (to combat overfitting)
+        # ---------------------------------------------------------------------
+        from stage3_models.model_enhancement import TimeSeriesAugmenter
+        
+        augmenter = TimeSeriesAugmenter(
+            noise_std=0.03,  # Moderate noise
+            scale_range=(0.9, 1.1),  # Moderate scaling
+            time_warp_strength=0.1
+        )
+        
+        with console.status(f"[bold]Fold {fold+1}: Augmenting training data...[/bold]", spinner="dots"):
+            X_train_aug, y_train_aug = augmenter.augment(
+                X_train, y_train,
+                methods=['noise', 'scale'],
+                augment_ratio=0.5  # 50% more samples
+            )
+        
+        console.print(f" [bold]After augmentation:[/bold] {len(y_train_aug)} samples")
+        
+        # Use augmented data for training
+        X_train = X_train_aug
+        y_train = y_train_aug
+
         # Convert to tensors
         X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
         X_val_t = torch.tensor(X_val, dtype=torch.float32).to(device)
@@ -150,7 +174,7 @@ def run_complete_pipeline(
         cnn = create_cnn_extractor(
             input_shape=(window_size, input_channels),
             embedding_dim=cnn_embedding_dim,
-            dropout=0.2
+            dropout=0.3  # Optimal from best run
         ).to(device)
         
         def extract_cnn_features_batch(model, X_tensor, batch_size=64):
@@ -211,17 +235,16 @@ def run_complete_pipeline(
             siao_pop_size=siao_pop_size,
             siao_max_iter=siao_max_iter,
             bp_epochs=bp_epochs,
-            bp_lr=0.001,
+            bp_lr=0.00073,  # Optimal LR
             weight_bounds=(-1.0, 1.0),
-            fc_dropout=0.2,
-            weight_decay=1e-5,
-            patience=20
+            fc_dropout=0.3,  # Optimal FC dropout
+            weight_decay=5e-4,  # Optimal weight decay
+            patience=15  # Early stopping
         )
         
-        # Class Weights
+        # Class Weights (no label smoothing - hurts small datasets)
         if use_class_weights:
             class_counts = np.bincount(y_train, minlength=num_classes)
-            # Add 1 to avoid division by zero if a class is missing in a fold (unlikely with StratifiedKFold)
             weights = len(y_train) / (num_classes * (class_counts + 1))
             weights_t = torch.tensor(weights, dtype=torch.float32).to(device)
             trainer.criterion = nn.CrossEntropyLoss(weight=weights_t)
@@ -310,16 +333,16 @@ def quick_start():
     """
     return run_complete_pipeline(
         data_dir='data/',
-        window_size=100, # Updated to 100
+        window_size=100,
         stride=25,
-        cnn_embedding_dim=256,
+        cnn_embedding_dim=192,  # Balanced: between 128 and 320
         wks_dim=43,
-        rnn_hidden_size=128,
+        rnn_hidden_size=96,  # Balanced: between 64 and 128
         num_classes=6,
-        test_size=0.2, # Still used for fallback if needed, but CV overrides logic
+        test_size=0.2,
         wks_pop_size=15,
         wks_max_iter=30,
-        siao_pop_size=15,
+        siao_pop_size=10,
         siao_max_iter=30,
         bp_epochs=100,
         batch_size=163

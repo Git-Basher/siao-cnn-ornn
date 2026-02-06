@@ -1,0 +1,11 @@
+Best Accuracy: 0.8354
+
+Best Hyperparameters:
+  rnn_hidden_size: 128
+  cnn_embedding_dim: 320
+  bp_lr: 0.0007309539835912913
+  fc_dropout: 0.21649165607921678
+  weight_decay: 6.847920095574779e-05
+  siao_pop_size: 10
+  siao_max_iter: 30
+  num_layers: 1
