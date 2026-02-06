@@ -26,9 +26,12 @@ def run_complete_pipeline(
     window_size: int = 50,
     stride: int = 25,
     cnn_embedding_dim: int = 256,
+    wks_dim: int = 43,  # WKS features dimension (num signals)
     rnn_hidden_size: int = 128,
     num_classes: int = 6,
     test_size: float = 0.2,
+    wks_pop_size: int = 15,
+    wks_max_iter: int = 30,
     siao_pop_size: int = 20,
     siao_max_iter: int = 50,
     bp_epochs: int = 100,
@@ -153,9 +156,52 @@ def run_complete_pipeline(
     
     logger.info(f"CNN embeddings: Train={X_train_cnn.shape}, Val={X_val_cnn.shape}")
     
+    # =========================================================================
+    # Step 4.5: WKS Feature Extraction (Aquila-optimized)
+    # =========================================================================
+    logger.info("=" * 60)
+    logger.info("Step 4.5: WKS Feature Extraction (Aquila-optimized)")
+    logger.info("=" * 60)
+    
+    from stage4_optimizers.aquila_optimizer import WKSOptimizer, compute_wks
+    
+    # Optimize omega using Aquila on training data
+    wks_optimizer = WKSOptimizer(
+        pop_size=wks_pop_size,
+        max_iter=wks_max_iter,
+        omega_bounds=(0.1, 10.0)
+    )
+    
+    optimal_omega, wks_fitness, _ = wks_optimizer.optimize(X_train, y_train)
+    logger.info(f"Optimal omega: {optimal_omega:.4f}, Fitness: {wks_fitness:.4f}")
+    
+    # Extract WKS features for train and val
+    X_train_wks = wks_optimizer.extract_wks_features(X_train)
+    X_val_wks = wks_optimizer.extract_wks_features(X_val)
+    
+    # Flatten WKS features if needed: [samples, num_features]
+    if len(X_train_wks.shape) > 2:
+        X_train_wks = X_train_wks.reshape(X_train_wks.shape[0], -1)
+        X_val_wks = X_val_wks.reshape(X_val_wks.shape[0], -1)
+    
+    logger.info(f"WKS features: Train={X_train_wks.shape}, Val={X_val_wks.shape}")
+    
+    # =========================================================================
+    # Step 4.75: Concatenate CNN + WKS Features
+    # =========================================================================
+    logger.info("=" * 60)
+    logger.info("Step 4.75: Concatenating CNN + WKS Features")
+    logger.info("=" * 60)
+    
+    # Concatenate: [samples, cnn_dim + wks_dim]
+    X_train_combined = np.concatenate([X_train_cnn, X_train_wks], axis=1)
+    X_val_combined = np.concatenate([X_val_cnn, X_val_wks], axis=1)
+    
+    logger.info(f"Combined features: Train={X_train_combined.shape}, Val={X_val_combined.shape}")
+    
     # Reshape for RNN: [samples, seq_len=1, features]
-    X_train_rnn = X_train_cnn[:, np.newaxis, :]
-    X_val_rnn = X_val_cnn[:, np.newaxis, :]
+    X_train_rnn = X_train_combined[:, np.newaxis, :]
+    X_val_rnn = X_val_combined[:, np.newaxis, :]
     
     logger.info(f"RNN input: Train={X_train_rnn.shape}, Val={X_val_rnn.shape}")
     
@@ -168,8 +214,11 @@ def run_complete_pipeline(
     
     from stage3_models.ornn_model import ORNN, SIAOORNNTrainer, plot_ornn_training
     
+    # Combined input size = CNN embedding + WKS features
+    combined_input_size = X_train_combined.shape[1]
+    
     ornn = ORNN(
-        input_size=cnn_embedding_dim,
+        input_size=combined_input_size,
         hidden_size=rnn_hidden_size,
         num_layers=1,
         cell_type='gru'
@@ -250,9 +299,12 @@ def quick_start():
         window_size=50,
         stride=25,
         cnn_embedding_dim=256,
+        wks_dim=43,
         rnn_hidden_size=128,
         num_classes=6,
         test_size=0.2,
+        wks_pop_size=15,
+        wks_max_iter=30,
         siao_pop_size=15,
         siao_max_iter=30,
         bp_epochs=50,
